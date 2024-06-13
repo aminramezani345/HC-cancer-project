@@ -1,0 +1,194 @@
+________________________________________
+
+######################################################################
+# Imports and parameters
+#!pip install torch 
+import torch
+import torch.nn as nn
+from torch.utils.data import Dataset, DataLoader
+import torch
+import torch.nn as nn
+from torch.utils.data import Dataset, DataLoader
+from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import pipeline
+from langchain.llms.huggingface_pipeline import HuggingFacePipeline
+from langchain.prompts import PromptTemplate
+from time import time
+import os
+import pandas as pd
+import pyreadr
+import re
+from collections import OrderedDict
+from accelerate import Accelerator
+import torch
+import tensorflow as tf
+import ast
+import pandas as pd
+from ast import literal_eval
+from torch.utils.data import Dataset, DataLoader
+from torch.nn.utils.rnn import pad_sequence
+import torch
+from torch.utils.data import DataLoader
+ 
+ 
+######################################################################
+# Device
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+ 
+######################################################################
+# Dummy DataSet/Create  Batches
+ 
+model_id = r"C:\Users\VHAHOURAMEZA0\LLMmodels\SOLAR" 
+tokenizer = AutoTokenizer.from_pretrained(model_id)
+ 
+#sample_folder_path = r".\under_run_samples"
+sample_folder_path = r".\under_run_samples"
+k = 0
+input_tensor_list=pd.DataFrame(columns=['filename', 
+                                       'Tokens'
+                            ])
+# Check if the folder exists
+if os.path.exists(sample_folder_path) and os.path.isdir(sample_folder_path):
+    # List all files in the folder
+    files = os.listdir(sample_folder_path)
+    # Iterate through each file
+    for file_name in files:
+        # Check if the file is a text file
+        if file_name.endswith(".txt"):
+            file_path = os.path.join(sample_folder_path, file_name)
+ 
+            # Open and read the text file
+            with open(file_path, 'r') as file:
+                text = file.read()
+                k = k + 1
+                print(k)
+                cleaned_text = re.sub(r'[^\w\s:.]', '', text)
+                cleaned_text = re.sub(r'\n\s*\n', '\n', cleaned_text)
+                cleaned_text = re.sub(r':', ' :', cleaned_text)
+                cleaned_text = re.sub(r'\n\s*\n', '\n', cleaned_text)
+                question = """Look in the following report and answer what is the histology diagnosis:\n""" + cleaned_text + """\n
+                    The answer is: """    
+ 
+                #input_ids = tokenizer(question, return_tensors="pt",padding=True, truncation=True,max_length=4096)['input_ids']
+                input_ids = tokenizer(question, return_tensors="pt")['input_ids']
+ 
+                new_OUT={'filename': file_name, 
+                         'Tokens':input_ids
+                         }
+                input_tensor_list.loc[len(input_tensor_list)]=new_OUT
+ 
+class CustomDataset(Dataset):
+    def __init__(self, dataframe):
+        self.dataframe = dataframe
+        self.len = len(dataframe)
+ 
+    def __getitem__(self, index):
+        tensor_str = str(self.dataframe.iloc[index]['Tokens'])
+        tensor_str_cleaned=re.sub(r'tensor\((.*?)\)',r'\1',tensor_str)
+        tensor = torch.tensor(literal_eval(tensor_str_cleaned))
+        return tensor
+ 
+    def __len__(self):
+        return self.len
+ 
+# Create an instance of CustomDataset
+custom_dataset = CustomDataset(input_tensor_list)
+custom_dataset=custom_dataset.dataframe.Tokens
+custom_dataset = pd.DataFrame(custom_dataset)
+# Extract all tensors from the 'Tokens' column
+all_tensors = [tensor for row in custom_dataset['Tokens'] for tensor in row]
+# Find the maximum length of tensors in the entire dataset
+max_length = max(len(tensor) for tensor in all_tensors)
+ 
+x_data_list = []
+for index, row in custom_dataset.iterrows():
+    # Extract tensors from the 'Tokens' column
+    tensors = row['Tokens']
+    stacked_tensor=[torch.nn.functional.pad(tensors, pad=(0, max_length - len(tensors[0])))]
+    # Stack tensors along a new dimension (dim=0)
+    stacked_tensor = pad_sequence(tuple(stacked_tensor),batch_first=True,padding_value=0)
+    # Append the stacked tensor to the x_data_list
+    x_data_list.append(stacked_tensor)
+# Combine the list of stacked tensors into a single tensor
+x_data = torch.stack(x_data_list, dim=0)
+x_data_cut=x_data[...,:1200]
+# Print the result
+custom_dataset=x_data_cut
+# Create a DataLoader for batching
+batch_size = 8  # Adjust the batch size according to your needs
+data_loader = DataLoader(dataset=custom_dataset, batch_size=batch_size, shuffle=True)
+ 
+'''
+###############################test by FF model#################################
+input_size = 3258
+output_size = 5
+batch_size = 8
+ 
+class Model(nn.Module):
+    # Our model
+ 
+    def __init__(self, input_size, output_size):
+        super(Model, self).__init__()
+        self.fc = nn.Linear(input_size, output_size)
+ 
+    def forward(self, input):
+        output = self.fc(input)
+        print("\tIn Model: input size", input.size(),
+              "output size", output.size())
+ 
+        return output
+ 
+ 
+model = Model(input_size, output_size)
+if torch.cuda.device_count() > 1:
+  print("Let's use", torch.cuda.device_count(), "GPUs!")
+  # dim = 0 [30, xxx] -> [10, ...], [10, ...], [10, ...] on 3 GPUs
+  model = nn.DataParallel(model)
+ 
+model.to(device)
+ 
+for data in data_loader:
+    data=data.to(torch.float)
+    input1 = data.to(device)
+    output = model(input1)
+    print("output", output)
+'''
+######################################################################
+# SOLAR Model
+ 
+model_id = r"C:\Users\VHAHOURAMEZA0\LLMmodels\Mistral4bit" 
+model = AutoModelForCausalLM.from_pretrained(model_id)
+net0=model.to(device)
+net = nn.DataParallel(net0)
+'''
+for batch in data_loader:
+
+    batch=tuple(input_tensor.to(device) for input_tensor in batch) 
+    for input_tensor in batch: 
+        print(input_tensor.shape)
+    st=time()
+    with torch.no_grad():
+        outputs = nn.parallel.data_parallel(net0, batch)
+    max_new_tokens=10
+    for i, output in enumerate(outputs):
+        Histologic_diagnosis = tokenizer.decode(output[-10:]).split()
+        print("Histologic diagnosis on GPU", i,"is", Histologic_diagnosis)
+    end=time()
+    print("processing time is",str(end-st))
+'''
+ 
+for data in data_loader:
+    N = data.size(-1)
+    data = data.view(-1, N)
+    input = data.to(device)
+ 
+    st=time()
+    with torch.no_grad():
+        outputs = net.module.generate(input, max_new_tokens=10)
+    max_new_tokens=10
+    for i, output in enumerate(outputs):
+        Histologic_diagnosis = tokenizer.decode(output[-10:]).split()
+        print("Histologic diagnosis on GPU", i,"is", Histologic_diagnosis)
+    end=time()
+    print("processing time is",str(end-st))
+
